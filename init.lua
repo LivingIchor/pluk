@@ -10,8 +10,9 @@ local M = {}
 ---@alias Pointer function
 
 ---@class Repo
----@field name string
----@field install_hook boolean
+---@field url string
+---@field path string
+---@field hook boolean
 ---@field setup string
 
 local LOG_FILE = script_path .. "/pluk.log"
@@ -246,9 +247,10 @@ local extract_install_hooks = function(config_ptr, repo)
 end
 
 ---@param repo_table Repo
----@param name string
+---@param url string
+---@param repo_path string
 ---@param config string
-M.add_repo = function(repo_table, name, config)
+M.add_repo = function(repo_table, url, repo_path, config)
 	repo_table = repo_table == nil and {} or repo_table
 
 	-- Must run a trigger command after an install if there's a hook
@@ -256,7 +258,7 @@ M.add_repo = function(repo_table, name, config)
 	local config_ptr = create_pointer(config:gsub('"', "'"))
 
 	-- Find, extract, and set post install hooks
-	for hook_str in extract_install_hooks(config_ptr, name) do
+	for hook_str in extract_install_hooks(config_ptr, url) do
 		if hook_str == "" then
 			return ""
 		end
@@ -269,8 +271,9 @@ M.add_repo = function(repo_table, name, config)
 
 	---@type Repo
 	local new_repo = {
-		name = name,
-		install_hook = found_hook,
+		url = url,
+		path = repo_path,
+		hook = found_hook,
 		setup = config_ptr(),
 	}
 	table.insert(repo_table, new_repo)
@@ -381,22 +384,22 @@ M.run_setup = function(repo_table, raw_env)
 
 	local hook_trigger = ""
 	for i, repo in ipairs(repo_table) do
-		if repo.install_hook then
+		if repo.hook then
 			hook_trigger = "trigger-user-hook pluk-install-index-" .. i
 		end
 
-		local repo_path = options.install.dir .. (options.install.dir:sub(-1) == "/" and "" or "/") .. repo.name
-		local repo_exists = os.execute(string.format("[ -d '%s' ]", repo_path))
+		local install_location = options.install.dir .. (options.install.dir:sub(-1) == "/" and "" or "/") .. repo.path
+		local repo_exists = os.execute(string.format("[ -d '%s' ]", install_location))
 
 		if not repo_exists or repo_exists == 1 then -- Both to account for lua 5.1 and lua >5.1
 			print(
 				string.format(
-					'eval %%sh{ git clone -q --depth 1 https://github.com/%s %s; echo "eval -client %s %%{ %s\n%s\n%s }" | kak -p "%s" }',
-					repo.name,
-					repo_path,
+					'eval %%sh{ git clone -q --depth 1 %s %s; echo "eval -client %s %%{ %s\n%s\n%s }" | kak -p "%s" }',
+					repo.url,
+					install_location,
 					client,
 					hook_trigger,
-					string.format([[$(lua -e "require('pluk').get_load_commands('%s')")]], repo_path),
+					string.format([[$(lua -e "require('pluk').get_load_commands('%s')")]], install_location),
 					repo.setup,
 					session
 				)
@@ -406,7 +409,7 @@ M.run_setup = function(repo_table, raw_env)
 				string.format(
 					'eval %%sh{ echo "eval -client %s %%{ %s\n%s }" | kak -p "%s" }',
 					client,
-					string.format([[$(lua -e "require('pluk').get_load_commands('%s')")]], repo_path),
+					string.format([[$(lua -e "require('pluk').get_load_commands('%s')")]], install_location),
 					repo.setup,
 					session
 				)
