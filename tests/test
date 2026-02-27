@@ -1,0 +1,87 @@
+#!/bin/sh
+
+# --- Global Setup & Paths ---
+# Current: /path/to/project/pluk/tests
+SCRIPT_DIR=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
+# Parent: /path/to/project/pluk
+PLUK_DIR=$(dirname "$SCRIPT_DIR")
+# Grandparent: /path/to/project
+ROOT_DIR=$(dirname "$PLUK_DIR")
+
+TEST_USER_CONFIG="$SCRIPT_DIR/fake_user"
+
+# Export LUA_PATH globally so both unit tests and Kakoune can find pluk
+export LUA_PATH="$ROOT_DIR/?.lua;$ROOT_DIR/?/init.lua;;"
+
+
+# --- Functions ---
+
+run_units() {
+    echo "Running pure Lua unit tests..."
+    # Enable TDD by exposing helpers (yes, it's redundent)
+    export PLUK_TEST=true
+
+    lua "$SCRIPT_DIR/test.lua"
+}
+
+run_kak() {
+    echo "Starting Kakoune integration session..."
+    mkdir -p "$TEST_USER_CONFIG"
+
+    # Run Kakoune headless or interactive
+    KAKOUNE_CONFIG_DIR="$TEST_USER_CONFIG" \
+    kak -s "pluk-test-session" -e "
+        source '$SCRIPT_DIR/test.kak'
+        buffer *debug*
+    "
+
+    # Clean up automatically after Kakoune exits
+    cleanup
+}
+
+cleanup() {
+    echo "Cleaning up test directories..."
+    rm -rf "$SCRIPT_DIR/plugins" "$PLUK_DIR/colors" "$TEST_USER_CONFIG"
+}
+
+print_help() {
+    echo "Usage: $0 <directive>"
+    echo ""
+    echo "Directives:"
+    echo "  units   - Run the pure Lua unit tests"
+    echo "  kak     - Run the Kakoune integration test session"
+    echo "  all     - Run unit tests, then Kakoune integration"
+    echo "  clean   - Force clean up test directories"
+}
+
+
+# --- Command Router ---
+case "$1" in
+    help)
+        print_help
+        ;;
+    units)
+        run_units
+        ;;
+    kak)
+        run_kak
+        ;;
+    all)
+        run_units
+        # Only run Kakoune if the unit tests actually pass
+        if [ $? -eq 0 ]; then
+            run_kak
+        else
+            echo "Unit tests failed! Aborting Kakoune session."
+            exit 1
+        fi
+        ;;
+    clean)
+        cleanup
+        ;;
+    *)
+        # Catch-all for missing or invalid arguments
+        print_help
+        exit 1
+        ;;
+esac

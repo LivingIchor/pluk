@@ -3,7 +3,7 @@ source "pluk.kak"
 require-module pluk
 
 # Configure the manager
-set-option global pluk_install_dir "test/plugins"
+set-option global pluk_install_dir "tests/plugins"
 
 # Run the setup
 pluk-setup %{

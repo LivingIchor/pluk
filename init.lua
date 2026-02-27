@@ -6,14 +6,7 @@ package.path = script_path .. "/?.lua;" .. package.path
 -- use `kak -p` to run kak commands from this script
 -- and stderr is for the *debug* buffer
 local M = {}
-
----@alias Pointer function
-
----@class Repo
----@field url string
----@field path string
----@field hook boolean
----@field setup string
+local H = {}
 
 local LOG_FILE = script_path .. "/pluk.log"
 
@@ -33,7 +26,7 @@ local session = os.getenv("kak_session")
 --- Send a command to be ran by kakoune
 ---@param command string
 ---@return nil
-local send_command = function(command)
+H.send_command = function(command)
 	local cmd_msg = string.format("eval -client %s %%{%s}", client, command)
 	os.execute(string.format("kak -p %s <<EOF\n%s\nEOF", session, cmd_msg))
 end
@@ -41,7 +34,7 @@ end
 --- Log to the *debug* buffer and/or a log file based of log level
 ---@param level string
 ---@param msg string
-local function log(level, msg)
+H.log = function(level, msg)
 	if LogLevel[level] >= log_level then
 		-- Set up useful logging info
 		local timestamp = os.date("%T")
@@ -61,7 +54,7 @@ local function log(level, msg)
 			end
 
 			-- Also notify the user in the editor so they don't miss it
-			send_command(string.format("echo -markup %%{ {Error}Pluk Error: %s (see log for details) }", safe_msg))
+			H.send_command(string.format("echo -markup %%{ {Error}Pluk Error: %s (see log for details) }", safe_msg))
 		elseif LogLevel[level] <= LogLevel.DEBUG then -- TRACE & DEBUG should include linenumber and file name
 			io.stderr:write(string.format("[pluk] [%s] [%s:%d] %s", level, filename, info.currentline, safe_msg))
 		else -- INFO is simply for tracking state of the program
@@ -73,7 +66,7 @@ end
 --- Creates a string from a given table
 ---@param obj any
 ---@return string
-local function dump(obj)
+H.dump = function(obj)
 	-- Recurse through a table,
 	-- returning when something can be stringified
 	if type(obj) == "table" then
@@ -85,7 +78,7 @@ local function dump(obj)
 			if type(v) == "string" then
 				vstr = "[=[" .. v .. "]=]"
 			else
-				vstr = dump(v)
+				vstr = H.dump(v)
 			end
 
 			-- Creates the key-value string
@@ -105,44 +98,39 @@ end
 
 --- Iterates through the lines of a string
 ---@param str string
----@param start_pos integer|nil
+---@param pos Pointer
 ---@return function
-local lines = function(str, start_pos)
-	local pos = start_pos or 1
-	local line_num = 0
-
-	---@return string|nil, integer|nil, integer|nil, integer|nil
+H.lines = function(str, pos)
+	---@return string?, integer?
 	return function()
 		-- Stop if we've exhausted the string
-		if pos > #str then
+		if pos() > #str then
 			return nil
 		end
 
-		line_num = line_num + 1
-
 		-- Find next newline
-		local newline_idx = str:find("\n", pos, true)
+		local newline_idx = str:find("\n", pos(), true)
 
-		local start_of_this_line = pos
+		local start_of_this_line = pos()
 
 		local line
 		if newline_idx then
-			line = str:sub(pos, newline_idx - 1)
-			pos = newline_idx + 1
+			line = str:sub(pos(), newline_idx - 1)
+			pos(newline_idx + 1)
 		else
 			-- Last line (no trailing newline)
-			line = str:sub(pos)
-			pos = #str + 1
+			line = str:sub(pos())
+			pos(#str + 1)
 		end
 
-		return line, line_num, start_of_this_line, pos
+		return line, start_of_this_line
 	end
 end
 
 --- Creates a closure that acts like a pointer you get and set a value with
 ---@param val any
 ---@return Pointer
-local function create_pointer(val)
+H.create_pointer = function(val)
 	---@return any
 	return function(new_val)
 		if new_val ~= nil then
@@ -155,30 +143,30 @@ end
 --- Iterates and extracts install hooks from a string
 ---@param config_ptr Pointer
 ---@param repo string
-local extract_install_hooks = function(config_ptr, repo)
-	local pos = 1
+H.extract_hooks = function(config_ptr, repo)
+	local pos = H.create_pointer(1)
 
 	--- Iterator function for install hooks in a package config
-	---@return string|nil
+	---@return string?
 	return function()
-		if config_ptr() == nil or type(config_ptr()) ~= "string" or config_ptr() == "" or pos > #(config_ptr()) then
+		if config_ptr() == nil or type(config_ptr()) ~= "string" or config_ptr() == "" or pos() > #(config_ptr()) then
 			return nil
 		end
 
 		-- Find the first `pluk-install-hook` and capture every none whitespace
 		-- on the line before and after
 		local start_index, end_index, before, after =
-			config_ptr():find("[ %t\r\f\v]*(%S*)%s*pluk%-install%-hook%s*(%S*)[ %t\r\f\v]*\n", pos)
+			config_ptr():find("[ %t\r\f\v]*(%S*)%s*pluk%-install%-hook%s*(%S*)[ %t\r\f\v]*\n", pos())
 
 		if start_index then
 			-- Install hooks only accept one `%{}` block and can't have additional text on its start and end line
 			if before ~= "" or after ~= "%{" then
-				send_command(string.format("fail 'Too many arguments to ''%s'' install hook'", repo))
+				H.send_command(string.format("fail 'Too many arguments to ''%s'' install hook'", repo))
 				return ""
 			end
 
 			-- Set posision to the first line of the hook
-			pos = end_index + 1
+			pos(end_index + 1)
 
 			-- Iterate over lines following the `pluk-install-hook %{`
 			-- till the matching closing brace `}` is found, without
@@ -187,7 +175,7 @@ local extract_install_hooks = function(config_ptr, repo)
 			local depth = 1
 			local first_command = true
 			local hook_str = "pluk-install-hook %{"
-			for line, _, _, next_start in lines(config_ptr(), pos) do
+			for line in H.lines(config_ptr(), pos) do
 				local trimmed = line:match("^%s*(.-)%s*$")
 
 				-- Skip over any comments found in the string
@@ -205,11 +193,9 @@ local extract_install_hooks = function(config_ptr, repo)
 					depth = depth - 1
 				end
 
-				pos = next_start
-
 				if depth == 0 then -- Is this the last line of the install hook
 					if trimmed:find("}%s*%S+%s*$") then
-						send_command(string.format("fail 'Too many arguments to ''%s'' install hook'", repo))
+						H.send_command(string.format("fail 'Too many arguments to ''%s'' install hook'", repo))
 						return ""
 					end
 					hook_str = hook_str .. trimmed
@@ -223,7 +209,7 @@ local extract_install_hooks = function(config_ptr, repo)
 			end
 
 			if depth ~= 0 then
-				send_command(string.format("fail 'Unbalanced hook braces in ''%s'' install hook block'", repo))
+				H.send_command(string.format("fail 'Unbalanced hook braces in ''%s'' install hook block'", repo))
 				return ""
 			end
 
@@ -232,11 +218,11 @@ local extract_install_hooks = function(config_ptr, repo)
 			if start_index > 1 then
 				new_str = config_ptr():sub(0, start_index - 1)
 			end
-			new_str = new_str .. config_ptr():sub(pos, -1)
+			new_str = new_str .. config_ptr():sub(pos(), -1)
 			config_ptr(new_str)
 
 			-- Set up for subsequent calls
-			pos = start_index
+			pos(start_index)
 
 			-- Return the repo and its possible config
 			return hook_str
@@ -255,16 +241,16 @@ M.add_repo = function(repo_table, url, repo_path, config)
 
 	-- Must run a trigger command after an install if there's a hook
 	local found_hook = false
-	local config_ptr = create_pointer(config:gsub('"', "'"))
+	local config_ptr = H.create_pointer(config:gsub('"', "'"))
 
 	-- Find, extract, and set post install hooks
-	for hook_str in extract_install_hooks(config_ptr, url) do
+	for hook_str in H.extract_hooks(config_ptr, url) do
 		if hook_str == "" then
 			return ""
 		end
 
 		-- Immediately run any hooks found
-		send_command(hook_str)
+		H.send_command(hook_str)
 
 		found_hook = true
 	end
@@ -274,14 +260,14 @@ M.add_repo = function(repo_table, url, repo_path, config)
 		url = url,
 		path = repo_path,
 		hook = found_hook,
-		setup = config_ptr(),
+		config = config_ptr(),
 	}
 	table.insert(repo_table, new_repo)
 
 	-- Create a string to set an option with
 	local repo_str = "{\n"
 	for _, t in ipairs(repo_table) do
-		repo_str = repo_str .. dump(t) .. ",\n"
+		repo_str = repo_str .. H.dump(t) .. ",\n"
 	end
 	repo_str = repo_str .. "}"
 
@@ -291,7 +277,7 @@ end
 
 --- Provides the commands to source a plugin and require its modules, if any
 ---@param path string
-M.get_load_commands = function(path)
+H.get_load_commands = function(path)
 	local load_cmds = {}
 	local rc_path = path .. "/rc"
 
@@ -328,94 +314,282 @@ M.get_load_commands = function(path)
 	p:close()
 
 	-- Run by the lua shell command so must print to return anything
-	print(table.concat(load_cmds, "\n"))
+	return table.concat(load_cmds, "\n")
 end
 
---- Creates a lua table from all the pluk options in Kakoune
----@param raw_env string
-local hydrate_options = function(raw_env)
-	local options = {}
+------------------------------------------------------------------------------------------
 
-	for line in raw_env:gmatch("[^\r\n]+") do
-		-- Remove the prefix and lowercase everything
-		-- Input:  KAK_OPT_PLUK_UI_FACE=info
-		-- Target: ui.face = info
-		local key, value = line:match("^kak_opt_pluk_([^=]+)=(.*)")
+---@enum PlukOpName
+local PlukOpName = {
+	not_pluk = 0,
 
-		if key then
-			key = key:lower()
-			local current = options
-			local parts = {}
+	-- Ops that can have hooks
+	pluk_repo = 1,
+	pluk = 2,
+}
 
-			-- Split key by underscores for nesting (e.g., ui_face -> {ui, face})
-			for part in key:gmatch("[^_]+") do
-				table.insert(parts, part)
+---@class PlukOp
+---@field low_param integer
+---@field high_param integer
+
+---@type PlukOp[]
+local PlukOps = {
+	{ low_param = 2, high_param = 3 },
+	{ low_param = 1, high_param = 2 },
+}
+
+---@class PlukCommand
+---@field op PlukOpName
+---@field [integer] string
+
+---@alias Pointer function
+
+---@class Repo
+---@field url string
+---@field path string
+---@field hook boolean
+---@field config string
+
+---@param str string
+---@param pos Pointer
+function H.construct_params(str, pos, identity, params, count)
+	if str:match("^[ %t\r\f\v]*\n", pos()) or str:match("^[ %t\r\f\v]*$", pos()) then
+		if count < PlukOps[identity].low_param then
+			return 2
+		end
+		return
+	elseif count >= PlukOps[identity].high_param then
+		return 2
+	end
+
+	local _, last, capture = str:find("[ %t\r\f\v]*(%S)", pos())
+
+	local closer
+	if capture == "'" or capture == '"' then
+		closer = capture
+		pos(last + 1)
+	elseif capture == "%" then
+		if str:sub(last + 1, last + 1) ~= "{" then
+			return 1
+		end
+		closer = "}"
+		pos(last + 2)
+	else
+		closer = "%s"
+	end
+
+	local depth = 1
+	local str_len = #str
+	local ch_idx = pos()
+	while ch_idx <= str_len do
+		local next_ch = str:sub(ch_idx + 1, ch_idx + 1)
+
+		if next_ch == "{" then
+			depth = depth + 1
+		end
+
+		if next_ch:match(closer) then
+			if closer:match("['\"]") and ch_idx < str_len and str:sub(ch_idx + 2, ch_idx + 2):match(closer) then
+				goto continue
+			elseif closer == "}" then
+				depth = depth - 1
+				if depth == 0 then
+					break
+				end
+
+				goto continue
 			end
+			break
+		end
 
-			-- Build nested tables
-			for i = 1, #parts - 1 do
-				local part = parts[i]
-				current[part] = current[part] or {}
-				current = current[part]
-			end
+		::continue::
+		ch_idx = ch_idx + 1
+	end
 
-			-- Type conversion for the final value
-			local final_val = value
-			if value == "true" then
-				final_val = true
-			elseif value == "false" then
-				final_val = false
-			elseif tonumber(value) then
-				final_val = tonumber(value)
-			end
+	local new_param = str:sub(pos(), ch_idx)
+	pos(ch_idx + 2)
 
-			current[parts[#parts]] = final_val
+	H.send_command("echo -debug %{ '" .. new_param .. "' }")
+
+	count = count + 1
+	(params())[count] = new_param
+
+	return H.construct_params(str, pos, identity, params, count)
+end
+
+---@param pos Pointer
+---@return (string[]|integer)?
+H.get_params = function(str, pos, identity)
+	if str == nil or str == "" then
+		return nil
+	end
+
+	local params = H.create_pointer({})
+	local err = H.construct_params(str, pos, identity, params, 0)
+	if err and err ~= 0 then
+		return err
+	end
+	return params()
+end
+
+---@param pos Pointer
+---@param identity PlukOpName
+---@return PlukCommand
+H.extract = function(str, pos, identity)
+	if str == nil or str == "" then
+		return {}
+	end
+
+	-- Get the name of the pluk command
+	local _, op_end, op_str = str:find("%s*(%S*)", pos())
+	pos(op_end + 1)
+	if PlukOpName[op_str] ~= identity then
+		-- TODO: Logging
+		os.exit(1)
+	end
+
+	---@type PlukCommand
+	local cmd = { op = identity }
+
+	---@type (string[]|integer)?
+	local params = H.get_params(str, pos, identity)
+	if type(params) == "number" then
+		if params == 0 then
+		elseif params == 1 then
+			-- TODO: Logging: Incompatible
+			os.exit(1)
+		elseif params == 2 then
+			-- TODO: Logging: Too few or too many arguements
+			os.exit(1)
+		else
+			-- This should never be reached
+			os.exit(1)
+		end
+	elseif params == nil then
+		-- TODO: Logging: a problem with get_params
+		os.exit(1)
+	end
+
+	---@cast params string[]
+	for i, val in ipairs(params) do
+		cmd[i] = val
+	end
+
+	return cmd
+end
+
+---@return PlukOpName
+H.cmd_identity = function(str)
+	for k, _ in pairs(PlukOpName) do
+		if str:match("^%s*(%S*)") == k:gsub("_", "-") then
+			return PlukOpName[k]
 		end
 	end
 
-	return options
+	return PlukOpName.not_pluk
 end
 
----@param repo_table Repo[]
----@param raw_env string
-M.run_setup = function(repo_table, raw_env)
-	-- Hydrate our options (install_dir, etc.) from the env we passed
-	local options = hydrate_options(raw_env)
+---@param setup_str string
+---@return Repo[]
+H.populate_repos = function(setup_str)
+	---@type Repo[]
+	local repos = {}
+
+	local repo_count = 0
+	local line_ptr = H.create_pointer(1)
+	local home_ptr = H.create_pointer(1)
+	for line, home in H.lines(setup_str, line_ptr) do
+
+		H.send_command("echo -debug %{ Hello }")
+		local trimmed = line:match("^%s*(.-)%s*$")
+		local identity = H.cmd_identity(trimmed)
+
+		-- TODO: Comment removal
+
+		if identity == PlukOpName.not_pluk then
+			H.send_command(trimmed)
+			goto continue
+		end
+
+		home_ptr(home)
+		---@type PlukCommand
+		local cmd = H.extract(setup_str, home_ptr, identity)
+		if home_ptr() > home then
+			line_ptr(home_ptr())
+		end
+
+		local url
+		local path
+		local config
+		if cmd.op == PlukOpName.pluk then
+			url = string.format("%s%s%s", os.getenv("kak_opt_pluk_git_protocol"), os.getenv("kak_opt_pluk_git_domain"), cmd[1]:sub(1,1) == '/' and cmd[1] or '/' .. cmd[1])
+			path = cmd[1]
+			config = cmd[2]
+		elseif cmd.op == PlukOpName.pluk_repo then
+			url = cmd[1]
+			path = cmd[2]
+			config = cmd[3]
+		else -- This should never be reached
+			os.exit(1)
+		end
+
+		local found_hook = false
+		for hook in H.extract_hooks(H.create_pointer(config), cmd[1]) do
+			if hook == "" or hook == nil then
+				-- TODO: Logging
+				os.exit(1)
+			end
+
+			H.send_command(hook)
+			found_hook = true
+		end
+
+		---@type Repo
+		local new_repo = {
+			url = url,
+			path = path,
+			hook = found_hook,
+			config = config,
+		}
+
+		repo_count = repo_count + 1
+		repos[repo_count] = new_repo
+
+		::continue::
+	end
+
+	return repos
+end
+
+---@param setup_str string
+M.run_setup = function(setup_str)
+	---@type Repo[]
+	local repos = H.populate_repos(setup_str)
 
 	local hook_trigger = ""
-	for i, repo in ipairs(repo_table) do
+	for i, repo in ipairs(repos) do
+		H.send_command("echo -debug %{ Howdy }")
 		if repo.hook then
 			hook_trigger = "trigger-user-hook pluk-install-index-" .. i
 		end
 
-		local install_location = options.install.dir .. (options.install.dir:sub(-1) == "/" and "" or "/") .. repo.path
+		local install_dir = os.getenv("kak_opt_pluk_install_dir")
+		if install_dir == nil then
+			-- TODO: Logging
+			return
+		end
+		local install_location = install_dir .. (install_dir:sub(-1) == "/" and "" or "/") .. repo.path
 		local repo_exists = os.execute(string.format("[ -d '%s' ]", install_location))
 
 		if not repo_exists or repo_exists == 1 then -- Both to account for lua 5.1 and lua >5.1
-			print(
-				string.format(
-					'eval %%sh{ git clone -q --depth 1 %s %s; echo "eval -client %s %%{ %s\n%s\n%s }" | kak -p "%s" }',
-					repo.url,
-					install_location,
-					client,
-					hook_trigger,
-					string.format([[$(lua -e "require('pluk').get_load_commands('%s')")]], install_location),
-					repo.setup,
-					session
-				)
-			)
-		else
-			print(
-				string.format(
-					'eval %%sh{ echo "eval -client %s %%{ %s\n%s }" | kak -p "%s" }',
-					client,
-					string.format([[$(lua -e "require('pluk').get_load_commands('%s')")]], install_location),
-					repo.setup,
-					session
-				)
-			)
+			os.execute(string.format("git clone -q --depth 1 %s %s", repo.url, install_location))
 		end
+
+		H.send_command(string.format("%s\n%s\n%s", hook_trigger, H.get_load_commands(install_location), repo.config))
 	end
 end
+
+-- Export internals ONLY when testing
+M.helper = os.getenv("PLUK_TEST") and H or nil
 
 return M
