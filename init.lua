@@ -2,9 +2,6 @@
 local script_path = debug.getinfo(1).source:match("@?(.*)/")
 package.path = script_path .. "/?.lua;" .. package.path
 
--- stdout is reserved for returning data to kakoune,
--- use `kak -p` to run kak commands from this script
--- and stderr is for the *debug* buffer
 local M = {}
 local H = {}
 
@@ -63,69 +60,36 @@ H.log = function(level, msg)
 	end
 end
 
---- Creates a string from a given table
----@param obj any
----@return string
-H.dump = function(obj)
-	-- Recurse through a table,
-	-- returning when something can be stringified
-	if type(obj) == "table" then
-		-- The variable holding the stringified table
-		local str = ""
-		for k, v in pairs(obj) do
-			-- Variable holding the stringified value of the pair
-			local vstr
-			if type(v) == "string" then
-				vstr = "[=[" .. v .. "]=]"
-			else
-				vstr = H.dump(v)
-			end
+---@enum PlukOpName
+local PlukOpName = {
+	not_pluk = 0,
 
-			-- Creates the key-value string
-			str = str .. k .. " = " .. vstr .. ", "
-		end
+	-- Ops that can have hooks
+	pluk_repo = 1,
+	pluk = 2,
+}
 
-		if #str > 0 then
-			return "{ " .. str:sub(1, -3) .. " }"
-		else -- Table must be empty
-			return "{}"
-		end
-	else
-		-- Base case for the recursion
-		return tostring(obj)
-	end
-end
+---@class PlukOp
+---@field low_param integer
+---@field high_param integer
 
---- Iterates through the lines of a string
----@param str string
----@param pos Pointer
----@return function
-H.lines = function(str, pos)
-	---@return string?, integer?
-	return function()
-		-- Stop if we've exhausted the string
-		if pos() > #str then
-			return nil
-		end
+---@type PlukOp[]
+local PlukOps = {
+	{ low_param = 2, high_param = 3 },
+	{ low_param = 1, high_param = 2 },
+}
 
-		-- Find next newline
-		local newline_idx = str:find("\n", pos(), true)
+---@class PlukCommand
+---@field op PlukOpName
+---@field [integer] string
 
-		local start_of_this_line = pos()
+---@class Repo
+---@field url string
+---@field path string
+---@field hook boolean
+---@field config string
 
-		local line
-		if newline_idx then
-			line = str:sub(pos(), newline_idx - 1)
-			pos(newline_idx + 1)
-		else
-			-- Last line (no trailing newline)
-			line = str:sub(pos())
-			pos(#str + 1)
-		end
-
-		return line, start_of_this_line
-	end
-end
+---@alias Pointer function
 
 --- Creates a closure that acts like a pointer you get and set a value with
 ---@param val any
@@ -138,6 +102,48 @@ H.create_pointer = function(val)
 		end
 		return val
 	end
+end
+
+--- Provides the commands to source a plugin and require its modules, if any
+---@param path string
+H.get_load_commands = function(path)
+	local load_cmds = {}
+	local rc_path = path .. "/rc"
+
+	-- Determine target directory (rc or root)
+	local attr = os.execute('test -d "' .. rc_path .. '" >/dev/null')
+	local target_dir = attr and rc_path or path
+
+	-- Find all .kak files in that directory (non-recursive)
+	local p = io.popen('find "' .. target_dir .. '" -maxdepth 1 -type f -name "*.kak" 2>/dev/null')
+	if p == nil then
+		return
+	end
+
+	for file in p:lines() do
+		-- Check if the file uses the module system
+		local f = io.open(file, "r")
+		if f == nil then
+			return
+		end
+		local content = f:read("*a")
+		f:close()
+
+		local module_name = content:match("provide%-module%s+([%w%-]+)")
+
+		if module_name then
+			-- It's a module! Source it, then require it.
+			table.insert(load_cmds, string.format("source '%s'", file))
+			table.insert(load_cmds, string.format("require-module %s", module_name))
+		else
+			-- Traditional script, just source it.
+			table.insert(load_cmds, string.format("source '%s'", file))
+		end
+	end
+	p:close()
+
+	-- Run by the lua shell command so must print to return anything
+	return table.concat(load_cmds, "\n")
 end
 
 --- Iterates and extracts install hooks from a string
@@ -231,124 +237,6 @@ H.extract_hooks = function(config_ptr, repo)
 		-- If no match is found, returning nothing (nil) stops the loop
 	end
 end
-
----@param repo_table Repo
----@param url string
----@param repo_path string
----@param config string
-M.add_repo = function(repo_table, url, repo_path, config)
-	repo_table = repo_table == nil and {} or repo_table
-
-	-- Must run a trigger command after an install if there's a hook
-	local found_hook = false
-	local config_ptr = H.create_pointer(config:gsub('"', "'"))
-
-	-- Find, extract, and set post install hooks
-	for hook_str in H.extract_hooks(config_ptr, url) do
-		if hook_str == "" then
-			return ""
-		end
-
-		-- Immediately run any hooks found
-		H.send_command(hook_str)
-
-		found_hook = true
-	end
-
-	---@type Repo
-	local new_repo = {
-		url = url,
-		path = repo_path,
-		hook = found_hook,
-		config = config_ptr(),
-	}
-	table.insert(repo_table, new_repo)
-
-	-- Create a string to set an option with
-	local repo_str = "{\n"
-	for _, t in ipairs(repo_table) do
-		repo_str = repo_str .. H.dump(t) .. ",\n"
-	end
-	repo_str = repo_str .. "}"
-
-	-- Run by the lua shell command so must print to return anything
-	print(repo_str)
-end
-
---- Provides the commands to source a plugin and require its modules, if any
----@param path string
-H.get_load_commands = function(path)
-	local load_cmds = {}
-	local rc_path = path .. "/rc"
-
-	-- Determine target directory (rc or root)
-	local attr = os.execute('test -d "' .. rc_path .. '" >/dev/null')
-	local target_dir = attr and rc_path or path
-
-	-- Find all .kak files in that directory (non-recursive)
-	local p = io.popen('find "' .. target_dir .. '" -maxdepth 1 -type f -name "*.kak" 2>/dev/null')
-	if p == nil then
-		return
-	end
-
-	for file in p:lines() do
-		-- Check if the file uses the module system
-		local f = io.open(file, "r")
-		if f == nil then
-			return
-		end
-		local content = f:read("*a")
-		f:close()
-
-		local module_name = content:match("provide%-module%s+([%w%-]+)")
-
-		if module_name then
-			-- It's a module! Source it, then require it.
-			table.insert(load_cmds, string.format("source '%s'", file))
-			table.insert(load_cmds, string.format("require-module %s", module_name))
-		else
-			-- Traditional script, just source it.
-			table.insert(load_cmds, string.format("source '%s'", file))
-		end
-	end
-	p:close()
-
-	-- Run by the lua shell command so must print to return anything
-	return table.concat(load_cmds, "\n")
-end
-
-------------------------------------------------------------------------------------------
-
----@enum PlukOpName
-local PlukOpName = {
-	not_pluk = 0,
-
-	-- Ops that can have hooks
-	pluk_repo = 1,
-	pluk = 2,
-}
-
----@class PlukOp
----@field low_param integer
----@field high_param integer
-
----@type PlukOp[]
-local PlukOps = {
-	{ low_param = 2, high_param = 3 },
-	{ low_param = 1, high_param = 2 },
-}
-
----@class PlukCommand
----@field op PlukOpName
----@field [integer] string
-
----@alias Pointer function
-
----@class Repo
----@field url string
----@field path string
----@field hook boolean
----@field config string
 
 ---@param str string
 ---@param pos Pointer
@@ -489,6 +377,37 @@ H.cmd_identity = function(str)
 	return PlukOpName.not_pluk
 end
 
+--- Iterates through the lines of a string
+---@param str string
+---@param pos Pointer
+---@return function
+H.lines = function(str, pos)
+	---@return string?, integer?
+	return function()
+		-- Stop if we've exhausted the string
+		if pos() > #str then
+			return nil
+		end
+
+		-- Find next newline
+		local newline_idx = str:find("\n", pos(), true)
+
+		local start_of_this_line = pos()
+
+		local line
+		if newline_idx then
+			line = str:sub(pos(), newline_idx - 1)
+			pos(newline_idx + 1)
+		else
+			-- Last line (no trailing newline)
+			line = str:sub(pos())
+			pos(#str + 1)
+		end
+
+		return line, start_of_this_line
+	end
+end
+
 ---@param setup_str string
 ---@return Repo[]
 H.populate_repos = function(setup_str)
@@ -499,8 +418,6 @@ H.populate_repos = function(setup_str)
 	local line_ptr = H.create_pointer(1)
 	local home_ptr = H.create_pointer(1)
 	for line, home in H.lines(setup_str, line_ptr) do
-
-		H.send_command("echo -debug %{ Hello }")
 		local trimmed = line:match("^%s*(.-)%s*$")
 		local identity = H.cmd_identity(trimmed)
 
