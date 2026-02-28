@@ -4,6 +4,9 @@
 declare-option -docstring "Plugin installation directory" \
     str pluk_install_dir "$HOME/.local/share/kak/plugins"
 
+declare-option -docstring "Sets the log level for pluk: ERROR, INFO, DEBUG, and TRACE" \
+    str pluk_loglevel "ERROR"
+
 declare-option -docstring "Git protocol used by the pluk command" \
     str pluk_git_protocol "https://"
 
@@ -33,6 +36,7 @@ def pluk-setup -params 1 \
         # Add all pluk options to shell environment
         echo "
             $kak_opt_pluk_install_dir
+            $kak_opt_pluk_loglevel
             $kak_opt_pluk_git_protocol
             $kak_opt_pluk_git_domain
 

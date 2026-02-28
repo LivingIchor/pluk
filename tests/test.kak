@@ -4,6 +4,7 @@ require-module pluk
 
 # Configure the manager
 set-option global pluk_install_dir "tests/plugins"
+set-option global pluk_loglevel "TRACE"
 
 # Run the setup
 pluk-setup %{
