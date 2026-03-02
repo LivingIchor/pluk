@@ -21,7 +21,6 @@ local LogLevel = {
 
 local log_level = LogLevel[os.getenv("kak_opt_pluk_loglevel") or "INFO"]
 
-local client = os.getenv("kak_client")
 local session = os.getenv("kak_session")
 local config_dir = os.getenv("kak_config")
 local install_dir = os.getenv("kak_opt_pluk_install_dir")
@@ -35,7 +34,7 @@ end
 ---@param command string
 ---@return nil
 H.send_command = function(command)
-	local cmd_msg = string.format("eval -client %s %%{%s}", client, command)
+	local cmd_msg = string.format("eval %%{%s}", command)
 	os.execute(string.format("kak -p %s <<EOF\n%s\nEOF", session, cmd_msg))
 end
 
@@ -284,7 +283,7 @@ H.extract_hooks = function(config_ptr, repo)
 					end
 					break
 				else
-					hook_str = hook_str .. (first_command and "" or ";") .. trimmed
+					hook_str = hook_str .. (first_command and "" or "\n") .. trimmed
 					first_command = false
 				end
 
@@ -328,7 +327,7 @@ H.ordinal = function(int)
 	elseif degree == 2 then
 		suffix = "nd"
 	elseif degree == 3 then
-		suffix "rd"
+		suffix = "rd"
 	end
 
 	return tostring(int) .. suffix
@@ -495,6 +494,14 @@ H.populate_repos = function(setup_str)
 		local identity = H.cmd_identity(trimmed)
 
 		-- TODO: Comment removal
+		if #trimmed == 0 or trimmed:sub(1,1) == '#' then
+			goto continue
+		end
+
+		local hashpos = trimmed:find('#')
+		if hashpos then
+			trimmed = trimmed:sub(1, hashpos - 1)
+		end
 
 		if identity == PlukOpName.not_pluk then
 			H.send_command(trimmed)
@@ -564,8 +571,12 @@ H.populate_repos = function(setup_str)
 				-- Symlink the colorscheme into root colors
 				local link_src = target_dir .. '/' .. colorscheme .. ".kak"
 				os.execute("mkdir -p " .. config_dir .. "/colors")
-				H.log(LogLevel.TRACE, ("Linking with: ln -s %s %s"):format(link_src, config_dir .. "/colors/" .. colorscheme .. ".kak"))
-				os.execute(("ln -s %s %s"):format(link_src, config_dir .. "/colors/" .. colorscheme .. ".kak"))
+				H.log(LogLevel.TRACE, "Testing for '" .. config_dir .. "/colors/" .. colorscheme .. ".kak")
+				local attr2 = os.execute('test -f "' .. config_dir .. "/colors/" .. colorscheme .. '.kak" >/dev/null')
+				if not attr2 then
+					H.log(LogLevel.TRACE, ("Linking with: ln -s %s %s"):format(link_src, config_dir .. "/colors/" .. colorscheme .. ".kak"))
+					os.execute(("ln -s %s %s"):format(link_src, config_dir .. "/colors/" .. colorscheme .. ".kak"))
+				end
 
 				local complete = string.format("\ncolorscheme %s\n%s", colorscheme, repo.config and repo.config or "")
 				H.log(LogLevel.DEBUG, string.format("Finished config:%s", complete:gsub("\n","\n >\t")))
