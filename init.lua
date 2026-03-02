@@ -23,6 +23,13 @@ local log_level = LogLevel[os.getenv("kak_opt_pluk_loglevel") or "INFO"]
 
 local client = os.getenv("kak_client")
 local session = os.getenv("kak_session")
+local config_dir = os.getenv("kak_config")
+local install_dir = os.getenv("kak_opt_pluk_install_dir")
+if install_dir == nil or install_dir == "" then
+	H.send_command("fail 'Aborting: pluk_install_dir unset'")
+	H.log(LogLevel.ERROR, "Aborting: pluk_install_dir unset")
+	return
+end
 
 --- Send a command to be ran by kakoune
 ---@param command string
@@ -81,6 +88,8 @@ local PlukOpName = {
 	[1] = "pluk_repo",
 	pluk = 2,
 	[2] = "pluk",
+	pluk_colorscheme = 3,
+	[3] = "pluk_colorscheme",
 }
 
 ---@class PlukOp
@@ -91,6 +100,7 @@ local PlukOpName = {
 local PlukOps = {
 	{ low_param = 2, high_param = 3 },
 	{ low_param = 1, high_param = 2 },
+	{ low_param = 2, high_param = 3 },
 }
 
 ---@class PlukCommand
@@ -100,8 +110,8 @@ local PlukOps = {
 ---@class Repo
 ---@field url string
 ---@field path string
----@field hook boolean
 ---@field config string
+---@field configurer function
 
 ---@alias Pointer function
 
@@ -115,6 +125,50 @@ H.create_pointer = function(val)
 			val = new_val
 		end
 		return val
+	end
+end
+
+local get_min_indent = function(text)
+	local min = math.huge
+	-- Look for a newline followed by any number of spaces or tabs
+	-- Skip purely empty lines to avoid getting a "0" result incorrectly
+	for indent in text:gmatch("\n([ \t]+)%S") do
+		min = math.min(min, #indent)
+	end
+
+	-- If no indentation was found, or text is one line, return 0
+	return min == math.huge and 0 or min
+end
+
+H.unindent = function(text)
+	local n = get_min_indent(text)
+	if n == 0 then return text end
+
+	-- Construct a pattern for exactly 'n' spaces/tabs
+	local pattern = "\n" .. ("[ \t]"):rep(n)
+	return (text:gsub(pattern, "\n"))
+end
+
+--- Returnes an iterator over the files matching a pattern in a directory (non-recursive)
+---@param target_dir string
+---@param pattern string
+---@return function?
+H.matching_files = function(target_dir, pattern)
+	H.log(LogLevel.TRACE, "Finding all files in '" .. target_dir .. "' matching '" .. pattern .. "'")
+	local p = io.popen('find "' .. target_dir .. '" -maxdepth 1 -type f -name "' .. pattern .. '" 2>/dev/null')
+	if p == nil then
+		H.log(LogLevel.ERROR, string.format("Failed to find anything in '%s'", target_dir))
+		return nil
+	end
+
+	---@return string?
+	return function()
+		local file = p:read("*l")
+		if file then
+			return file
+		end
+		-- EOF reached
+		p:close()
 	end
 end
 
@@ -132,16 +186,8 @@ H.get_load_commands = function(path)
 	local attr = os.execute('test -d "' .. rc_path .. '" >/dev/null')
 	local target_dir = attr and rc_path or path
 
-	-- Find all .kak files in that directory (non-recursive)
-	H.log(LogLevel.TRACE, "Finding all files in '" .. target_dir .. "'")
-	local p = io.popen('find "' .. target_dir .. '" -maxdepth 1 -type f -name "*.kak" 2>/dev/null')
-	if p == nil then
-		H.log(LogLevel.ERROR, string.format("Failed to find anything in '%s'", target_dir))
-		return false, PlukError.NonzeroExecute
-	end
-
-	H.log(LogLevel.TRACE, "Iterating over files found")
-	for file in p:lines() do
+	-- Find all .kak files in target directory (non-recursive)
+	for file in H.matching_files(target_dir, "*.kak") do
 		-- Check if the file uses the module system
 		H.log(LogLevel.TRACE, "Opening '" .. file .. "'")
 		local f = io.open(file, "r")
@@ -163,7 +209,6 @@ H.get_load_commands = function(path)
 			table.insert(load_cmds, string.format("source '%s'", file))
 		end
 	end
-	p:close()
 
 	H.log(LogLevel.INFO, "Got load commands")
 	H.log(LogLevel.DEBUG, "Load command contents: " .. table.concat(load_cmds, ", "))
@@ -209,7 +254,7 @@ H.extract_hooks = function(config_ptr, repo)
 			-- string representing the hook's commands
 			local depth = 1
 			local first_command = true
-			local hook_str = "pluk-install-hook %{"
+			local hook_str = ""
 			for line in H.lines(config_ptr(), pos) do
 				local trimmed = line:match("^%s*(.-)%s*$")
 
@@ -234,7 +279,9 @@ H.extract_hooks = function(config_ptr, repo)
 						H.log(LogLevel.ERROR, string.format("Too many arguments to '%s' install hook", repo))
 						os.exit(1)
 					end
-					hook_str = hook_str .. trimmed
+					if #trimmed > 1 then
+						hook_str = hook_str .. trimmed:sub(1, -2)
+					end
 					break
 				else
 					hook_str = hook_str .. (first_command and "" or ";") .. trimmed
@@ -258,11 +305,8 @@ H.extract_hooks = function(config_ptr, repo)
 			new_str = new_str .. config_ptr():sub(pos(), -1)
 			config_ptr(new_str)
 
-			-- Set up for subsequent calls
-			pos(start_index)
-
-			H.log(LogLevel.DEBUG, "Hook extracted:" .. hook_str:gsub("\n", "\n >\t"))
-			H.log(LogLevel.DEBUG, "New string with hook extracted:" .. new_str:gsub("\n", "\n >\t"))
+			H.log(LogLevel.DEBUG, "Hook extracted: " .. hook_str:gsub("\n", "\n >\t"))
+			H.log(LogLevel.DEBUG, "New string without extracted hook:" .. H.unindent(new_str):gsub("\n", "\n >\t"))
 
 			-- Return the repo and its possible config
 			return hook_str
@@ -359,7 +403,7 @@ H.construct_params = function(str, pos, identity, params, count)
 
 	count = count + 1
 	params[count] = new_param
-	H.log(LogLevel.DEBUG, string.format("Found %s parameter:%s", H.ordinal(count), new_param:gsub("\n","\n >\t")))
+	H.log(LogLevel.DEBUG, string.format("Found %s parameter:%s", H.ordinal(count), H.unindent(new_param):gsub("\n","\n >\t")))
 
 	return H.construct_params(str, pos, identity, params, count)
 end
@@ -376,7 +420,7 @@ H.extract = function(str, pos, identity)
 	-- Get the name of the pluk command
 	local _, op_end, op_str = str:find("%s*(%S*)", pos())
 	pos(op_end + 1)
-	if PlukOpName[op_str] ~= identity then
+	if PlukOpName[op_str:gsub("-","_")] ~= identity then
 		H.send_command(string.format("fail 'Found command ''%s'', doesn''t match expected ''%s'''", PlukOpName[op_str], PlukOpName[identity]:gsub("_","-")))
 		H.log(LogLevel.ERROR, string.format("Found command '%s', doesn't match expected '%s'", PlukOpName[op_str], PlukOpName[identity]:gsub("_","-")))
 		os.exit(1)
@@ -468,31 +512,87 @@ H.populate_repos = function(setup_str)
 		local url
 		local path
 		local config
+		local configurer = function(repo) -- Default configurer. Sources/requires plugin then runs config
+			local install_location = install_dir .. (install_dir:sub(-1) == "/" and "" or "/") .. repo.path
+			local ok, load_cmds = H.get_load_commands(install_location)
+			if ok then
+				local complete = string.format("\n%s\n%s", load_cmds, repo.config and repo.config or "")
+				H.log(LogLevel.DEBUG, string.format("Finished config:%s", complete:gsub("\n","\n >\t")))
+				H.send_command(complete)
+			end
+		end
 		if cmd.op == PlukOpName.pluk then
 			url = string.format("%s%s%s", os.getenv("kak_opt_pluk_git_protocol"), os.getenv("kak_opt_pluk_git_domain"), cmd[1]:sub(1,1) == '/' and cmd[1] or '/' .. cmd[1])
 			path = cmd[1]
-			config = cmd[2]
+			config = H.create_pointer(cmd[2])
 		elseif cmd.op == PlukOpName.pluk_repo then
 			url = cmd[1]
 			path = cmd[2]
-			config = cmd[3]
+			config = H.create_pointer(cmd[3])
+		elseif cmd.op == PlukOpName.pluk_colorscheme then
+			url = string.format("%s%s%s", os.getenv("kak_opt_pluk_git_protocol"), os.getenv("kak_opt_pluk_git_domain"), cmd[1]:sub(1,1) == '/' and cmd[1] or '/' .. cmd[1])
+			path = cmd[1]
+			config = H.create_pointer(cmd[3])
+			configurer = function(repo)
+				local install_location = install_dir .. (install_dir:sub(-1) == "/" and "" or "/") .. repo.path
+				local target_dir
+
+				H.log(LogLevel.TRACE, "Testing for '" .. install_location .. "/colors'")
+				local attr = os.execute('test -d "' .. install_location .. '/colors" >/dev/null')
+				if attr then
+					target_dir = install_location .. "/colors"
+				else
+					H.log(LogLevel.ERROR, "'" .. install_location .. "/colors' not found")
+					H.send_command("fail '''" .. install_location .. "/colors'' not found'")
+					os.exit(1)
+				end
+
+				local colorscheme
+				for file in H.matching_files(target_dir, "*.kak") do
+					H.log(LogLevel.INFO, "file: " .. file:sub(#target_dir + 2, -5))
+					if file:sub(#target_dir + 2, -5) == cmd[2] then
+						colorscheme = cmd[2]
+					end
+				end
+
+				if not colorscheme then
+					H.log(LogLevel.ERROR, string.format("No colorscheme '%s' found in '%s'", cmd[2], target_dir))
+					H.send_command(string.format("fail 'No colorscheme ''%s'' found in ''%s'''", cmd[2], target_dir))
+					os.exit(1)
+				end
+
+				-- Symlink the colorscheme into root colors
+				local link_src = target_dir .. '/' .. colorscheme .. ".kak"
+				os.execute("mkdir -p " .. config_dir .. "/colors")
+				H.log(LogLevel.TRACE, ("Linking with: ln -s %s %s"):format(link_src, config_dir .. "/colors/" .. colorscheme .. ".kak"))
+				os.execute(("ln -s %s %s"):format(link_src, config_dir .. "/colors/" .. colorscheme .. ".kak"))
+
+				local complete = string.format("\ncolorscheme %s\n%s", colorscheme, repo.config and repo.config or "")
+				H.log(LogLevel.DEBUG, string.format("Finished config:%s", complete:gsub("\n","\n >\t")))
+				H.send_command(complete)
+			end
 		else -- This should never be reached
 			os.exit(1)
 		end
 
 		-- Get out and run all the hooks in config
 		local found_hook = false
-		for hook in H.extract_hooks(H.create_pointer(config), cmd[1]) do
-			H.send_command(hook)
+		for hook in H.extract_hooks(config, cmd[1]) do
+			-- hook <scope> User <hook_name> <commands>
+			H.send_command(string.format("hook global User pluk-install-index-%d %%{eval %%sh{cd %s;%s}}", repo_count, install_dir .. "/" .. path, hook))
+
 			found_hook = true
+		end
+		if found_hook then
+			config(string.format("trigger-user-hook pluk-install-index-%d\n%s", repo_count, config()))
 		end
 
 		---@type Repo
 		local new_repo = {
 			url = url,
 			path = path,
-			hook = found_hook,
-			config = config,
+			config = (config() ~= nil) and H.unindent(config()) or "",
+			configurer = configurer,
 		}
 
 		repo_count = repo_count + 1
@@ -506,22 +606,10 @@ end
 
 ---@param setup_str string
 M.run_setup = function(setup_str)
-	local install_dir = os.getenv("kak_opt_pluk_install_dir")
-	if install_dir == nil or install_dir == "" then
-		H.send_command("fail 'Aborting: pluk_install_dir unset'")
-		H.log(LogLevel.ERROR, "Aborting: pluk_install_dir unset")
-		return
-	end
-
 	---@type Repo[]
 	local repos = H.populate_repos(setup_str)
 
-	local hook_trigger = ""
-	for i, repo in ipairs(repos) do
-		if repo.hook then
-			hook_trigger = "trigger-user-hook pluk-install-index-" .. i
-		end
-
+	for _, repo in ipairs(repos) do
 		local install_location = install_dir .. (install_dir:sub(-1) == "/" and "" or "/") .. repo.path
 		local repo_exists = os.execute(string.format("[ -d '%s' ]", install_location))
 
@@ -529,10 +617,7 @@ M.run_setup = function(setup_str)
 			os.execute(string.format("git clone -q --depth 1 %s %s", repo.url, install_location))
 		end
 
-		local ok, load_cmds = H.get_load_commands(install_location)
-		if ok then
-			H.send_command(string.format("%s\n%s\n%s", hook_trigger, load_cmds, repo.config and repo.config or ""))
-		end
+		repo:configurer()
 	end
 end
 

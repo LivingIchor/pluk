@@ -2,7 +2,7 @@
 # PUBLIC OPTIONS
 # =============================================================================
 declare-option -docstring "Plugin installation directory" \
-    str pluk_install_dir "$HOME/.local/share/kak/plugins"
+    str pluk_install_dir %sh{ echo "$KAKOUNE_CONFIG_DIR/plugins" }
 
 declare-option -docstring "Sets the log level for pluk: ERROR, INFO, DEBUG, and TRACE" \
     str pluk_loglevel "ERROR"
@@ -43,6 +43,7 @@ def pluk-setup -params 1 \
             # Make sure client and session are known by lua
             $kak_client
             $kak_session
+            $kak_config
         " >/dev/null
 
         # Runs setup based on constructed table of repos

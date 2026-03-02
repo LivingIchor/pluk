@@ -41,7 +41,7 @@ run_kak() {
 
 cleanup() {
     echo "Cleaning up test directories..."
-    rm -rf "$SCRIPT_DIR/plugins" "$PLUK_DIR/colors" "$TEST_USER_CONFIG"
+    rm -rf "$TEST_USER_CONFIG"
 }
 
 print_help() {
