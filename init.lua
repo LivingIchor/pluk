@@ -34,8 +34,46 @@ end
 ---@param command string
 ---@return nil
 H.send_command = function(command)
-	local cmd_msg = string.format("eval %%{%s}", command)
-	os.execute(string.format("kak -p %s <<EOF\n%s\nEOF", session, cmd_msg))
+	local cmd_msg = string.format("eval -client client0 %%{%s}", command)
+	os.execute(string.format("kak -p %s <<'EOF'\n%s\nEOF\n >/dev/null 2>&1 &", session, cmd_msg))
+end
+
+H.checked_send = function(kak_command)
+	-- Create a unique temporary filename
+	local tmp_flag = os.tmpname()
+	os.remove(tmp_flag) -- Ensure it doesn't exist yet
+
+	-- Build a command that only touches the file if the command succeeds
+	local wrapped_cmd = string.format(
+		"%s; nop %%sh{ touch %s }",
+		kak_command,
+		tmp_flag
+	)
+
+	-- Send it to Kakoune (Synchronously)
+	H.send_command(wrapped_cmd)
+
+	-- Check if the file exists (give Kakoune a few ms to process)
+	local success = false
+	for _ = 1, 20 do
+		local f = io.open(tmp_flag, "r")
+		if f then
+			f:close()
+			os.remove(tmp_flag)
+			success = true
+			break
+		end
+		os.execute("sleep 0.01")
+	end
+
+	if success then
+		H.log(LogLevel.INFO, string.format("Validated '%s' as a pluk command", kak_command))
+		return true
+	else
+		H.log(LogLevel.ERROR, string.format("'%s' failed validation as a pluk command", kak_command))
+		return false
+	end
+
 end
 
 --- Log to the *debug* buffer and/or a log file based of log level
@@ -57,16 +95,17 @@ H.log = function(level, msg)
 		if level == LogLevel.ERROR then
 			local log_fp = io.open(LOG_FILE, "a")
 			if log_fp then
-				log_fp:write(string.format("[%s] [ERROR] [%s:%d] %s'", timestamp, filename, info.currentline, msg))
+				log_fp:write(string.format("[%s] [ERROR] [%s:%d] %s\n", timestamp, filename, info.currentline, msg))
 				log_fp:close()
 			end
+			H.send_command(string.format("echo -debug %%{[Pluk] [ERROR] %s (see log for details)}", safe_msg))
 
 			-- Also notify the user in the editor so they don't miss it
 			H.send_command(string.format("echo -markup %%{ {Error}Pluk Error: %s (see log for details) }", safe_msg))
 		elseif level <= LogLevel.DEBUG then -- TRACE & DEBUG should include linenumber and file name
-			io.stderr:write(string.format("[pluk] [%s] [%s:%d] %s\n", LogLevel[level], filename, info.currentline, safe_msg))
+			H.send_command(string.format("echo -debug %%{[pluk] [%s] [%s:%d] %s}", LogLevel[level], filename, info.currentline, safe_msg))
 		else -- INFO is simply for tracking state of the program
-			io.stderr:write(string.format("[pluk] [%s] %s\n", LogLevel[level], safe_msg))
+			H.send_command(string.format("echo -debug %%{[pluk] [%s] %s}", LogLevel[level], safe_msg))
 		end
 	end
 end
@@ -97,13 +136,14 @@ local PlukOpName = {
 
 ---@type PlukOp[]
 local PlukOps = {
-	{ low_param = 2, high_param = 3 },
-	{ low_param = 1, high_param = 2 },
+	{ low_param = 2, high_param = 4 },
+	{ low_param = 1, high_param = 3 },
 	{ low_param = 2, high_param = 3 },
 }
 
 ---@class PlukCommand
 ---@field op PlukOpName
+---@field has_config boolean
 ---@field [integer] string
 
 ---@class Repo
@@ -230,24 +270,24 @@ H.extract_hooks = function(config_ptr, repo)
 			return
 		end
 
-		-- Find the first `pluk-install-hook` and capture every none whitespace
+		-- Find the first `pluk-hook` and capture every none whitespace
 		-- on the line before and after
 		local start_index, end_index, before, after =
-			config_ptr():find("[ %t\r\f\v]*(%S*)%s*pluk%-install%-hook%s*(%S*)[ %t\r\f\v]*\n", pos())
+			config_ptr():find("[ %t\r\f\v]*(%S*)%s*pluk%-hook%s*(%S*)[ %t\r\f\v]*\n", pos())
 		H.log(LogLevel.DEBUG, string.format("Before: '%s',\tAfter: '$s'", before, after))
 
 		if start_index then
 			-- Install hooks only accept one `%{}` block and can't have additional text on its start and end line
 			if before ~= "" or after ~= "%{" then
-				H.send_command(string.format("fail 'Too many arguments to ''%s'' install hook'", repo))
-				H.log(LogLevel.ERROR, string.format("Too many arguments to '%s' install hook", repo))
+				H.send_command(string.format("fail 'Too many arguments to ''%s'' hook'", repo))
+				H.log(LogLevel.ERROR, string.format("Too many arguments to '%s' hook", repo))
 				os.exit(1)
 			end
 
 			-- Set posision to the first line of the hook
 			pos(end_index + 1)
 
-			-- Iterate over lines following the `pluk-install-hook %{`
+			-- Iterate over lines following the `pluk-hook %{`
 			-- till the matching closing brace `}` is found, without
 			-- any following non-white space. While iterating add to a
 			-- string representing the hook's commands
@@ -274,8 +314,8 @@ H.extract_hooks = function(config_ptr, repo)
 
 				if depth == 0 then -- Is this the last line of the install hook
 					if trimmed:find("}%s*%S+%s*$") then
-						H.send_command(string.format("fail 'Too many arguments to ''%s'' install hook'", repo))
-						H.log(LogLevel.ERROR, string.format("Too many arguments to '%s' install hook", repo))
+						H.send_command(string.format("fail 'Too many arguments to ''%s'' hook'", repo))
+						H.log(LogLevel.ERROR, string.format("Too many arguments to '%s' hook", repo))
 						os.exit(1)
 					end
 					if #trimmed > 1 then
@@ -291,8 +331,8 @@ H.extract_hooks = function(config_ptr, repo)
 			end
 
 			if depth ~= 0 then
-				H.send_command(string.format("fail 'Unbalanced hook braces in ''%s'' install hook block'", repo))
-				H.log(LogLevel.ERROR, string.format("Unbalanced hook braces in '%s' install hook block", repo))
+				H.send_command(string.format("fail 'Unbalanced hook braces in ''%s'' hook block'", repo))
+				H.log(LogLevel.ERROR, string.format("Unbalanced hook braces in '%s' hook block", repo))
 				os.exit(1)
 			end
 
@@ -304,7 +344,7 @@ H.extract_hooks = function(config_ptr, repo)
 			new_str = new_str .. config_ptr():sub(pos(), -1)
 			config_ptr(new_str)
 
-			H.log(LogLevel.DEBUG, "Hook extracted: " .. hook_str:gsub("\n", "\n >\t"))
+			H.log(LogLevel.DEBUG, ("Hook extracted:\n" .. hook_str):gsub("\n", "\n >\t"))
 			H.log(LogLevel.DEBUG, "New string without extracted hook:" .. H.unindent(new_str):gsub("\n", "\n >\t"))
 
 			-- Return the repo and its possible config
@@ -336,18 +376,18 @@ end
 --- Recursive function that builds a table of the parameters passed to a pluk command
 ---@param str string
 ---@param pos Pointer
----@return table
-H.construct_params = function(str, pos, identity, params, count)
+---@param cmd PlukCommand
+H.construct_params = function(str, pos, cmd, count)
 	if str:match("^[ %t\r\f\v]*\n", pos()) or str:match("^[ %t\r\f\v]*$", pos()) then
-		if count < PlukOps[identity].low_param then
-			H.send_command(string.format("fail 'Too few arguments to %s'", PlukOpName[identity]:gsub("_","-")))
-			H.log(LogLevel.ERROR, string.format("Too few arguments to %s", PlukOpName[identity]:gsub("_","-")))
+		if count < PlukOps[cmd.op].low_param then
+			H.send_command(string.format("fail 'Too few arguments to %s'", PlukOpName[cmd.op]:gsub("_","-")))
+			H.log(LogLevel.ERROR, string.format("Too few arguments to %s", PlukOpName[cmd.op]:gsub("_","-")))
 			os.exit(1)
 		end
-		return params
-	elseif count >= PlukOps[identity].high_param then
-		H.send_command(string.format("fail 'Too many arguments to %s'", PlukOpName[identity]:gsub("_","-")))
-		H.log(LogLevel.ERROR, string.format("Too many arguments to %s", PlukOpName[identity]:gsub("_","-")))
+		return
+	elseif count >= PlukOps[cmd.op].high_param then
+		H.send_command(string.format("fail 'Too many arguments to %s'", PlukOpName[cmd.op]:gsub("_","-")))
+		H.log(LogLevel.ERROR, string.format("Too many arguments to %s", PlukOpName[cmd.op]:gsub("_","-")))
 		os.exit(1)
 	end
 
@@ -359,14 +399,17 @@ H.construct_params = function(str, pos, identity, params, count)
 		pos(last + 1)
 	elseif capture == "%" then
 		if str:sub(last + 1, last + 1) ~= "{" then
-			H.send_command(string.format("fail '%s only accepts %{} blocks'", PlukOpName[identity]:gsub("_","-")))
-			H.log(LogLevel.ERROR, string.format("%s only accepts %{} blocks", PlukOpName[identity]:gsub("_","-")))
+			H.send_command(string.format("fail '%s only accepts %{} blocks'", PlukOpName[cmd.op]:gsub("_","-")))
+			H.log(LogLevel.ERROR, string.format("%s only accepts %{} blocks", PlukOpName[cmd.op]:gsub("_","-")))
 			os.exit(1)
 		end
 		closer = "}"
 		pos(last + 2)
+
+		cmd.has_config = true
 	else
 		closer = "%s"
+		pos(last)
 	end
 
 	local depth = 1
@@ -401,10 +444,10 @@ H.construct_params = function(str, pos, identity, params, count)
 	pos(ch_idx + 2)
 
 	count = count + 1
-	params[count] = new_param
-	H.log(LogLevel.DEBUG, string.format("Found %s parameter:%s", H.ordinal(count), H.unindent(new_param):gsub("\n","\n >\t")))
+	cmd[count] = new_param
+	H.log(LogLevel.DEBUG, (string.format("Found %s parameter:\n%s", H.ordinal(count), H.unindent(new_param)):gsub("\n","\n >\t")))
 
-	return H.construct_params(str, pos, identity, params, count)
+	return H.construct_params(str, pos, cmd, count)
 end
 
 --- Assemble a string of the pluk option in the provided string, starting at the given position
@@ -426,13 +469,10 @@ H.extract = function(str, pos, identity)
 	end
 
 	---@type PlukCommand
-	local cmd = { op = identity }
+	local cmd = { op = identity, has_config = false }
 
 	---@type string[]
-	local params = H.construct_params(str, pos, identity, {}, 0)
-	for i, val in ipairs(params) do
-		cmd[i] = val
-	end
+	H.construct_params(str, pos, cmd, 0)
 
 	return cmd
 end
@@ -493,7 +533,7 @@ H.populate_repos = function(setup_str)
 		local trimmed = line:match("^%s*(.-)%s*$")
 		local identity = H.cmd_identity(trimmed)
 
-		-- TODO: Comment removal
+		-- Comment removal
 		if #trimmed == 0 or trimmed:sub(1,1) == '#' then
 			goto continue
 		end
@@ -516,6 +556,12 @@ H.populate_repos = function(setup_str)
 			line_ptr(home_ptr())
 		end
 
+		local virt_cmd = PlukOpName[cmd.op]:gsub("_","-") .. " " .. table.concat(cmd, " ", 1, (cmd.has_config and #cmd - 1 or #cmd))
+		if not H.checked_send(virt_cmd) then
+			os.exit(1)
+		end
+		local flag_count = (cmd.has_config and #cmd - 1 or #cmd) - PlukOps[cmd.op].low_param
+
 		local url
 		local path
 		local config
@@ -529,14 +575,49 @@ H.populate_repos = function(setup_str)
 			end
 		end
 		if cmd.op == PlukOpName.pluk then
-			url = string.format("%s%s%s", os.getenv("kak_opt_pluk_git_protocol"), os.getenv("kak_opt_pluk_git_domain"), cmd[1]:sub(1,1) == '/' and cmd[1] or '/' .. cmd[1])
-			path = cmd[1]
-			config = H.create_pointer(cmd[2])
+			url = string.format("%s%s%s", os.getenv("kak_opt_pluk_git_protocol"), os.getenv("kak_opt_pluk_git_domain"), cmd[1]:sub(1,1) == '/' and cmd[1] or '/' .. cmd[1 + flag_count])
+			path = cmd[1 + flag_count]
+			config = H.create_pointer(cmd[2 + flag_count])
+
+			for flag_idx = 1, flag_count do
+				local flag = cmd[flag_idx]
+				if flag == "-auto-source" then
+				elseif flag == "-no-source" then
+					configurer = function(repo)
+						local complete = string.format("\n%s", repo.config and repo.config or "")
+						H.log(LogLevel.DEBUG, string.format("Finished config:%s", complete:gsub("\n","\n >\t")))
+						H.send_command(complete)
+					end
+				else
+					H.log(LogLevel.ERROR, string.format("pluk doesn't accept '%s' as a flag", flag))
+					os.exit(1)
+				end
+			end
 		elseif cmd.op == PlukOpName.pluk_repo then
-			url = cmd[1]
-			path = cmd[2]
-			config = H.create_pointer(cmd[3])
+			url = cmd[1 + flag_count]
+			path = cmd[2 + flag_count]
+			config = H.create_pointer(cmd[3 + flag_count])
+
+			for flag_idx = 1, flag_count do
+				local flag = cmd[flag_idx]
+				if flag == "-auto-source" then
+				elseif flag == "-no-source" then
+					configurer = function(repo)
+						local complete = string.format("\n%s", repo.config and repo.config or "")
+						H.log(LogLevel.DEBUG, string.format("Finished config:%s", complete:gsub("\n","\n >\t")))
+						H.send_command(complete)
+					end
+				else
+					H.log(LogLevel.ERROR, string.format("pluk doesn't accept '%s' as a flag", flag))
+					os.exit(1)
+				end
+			end
 		elseif cmd.op == PlukOpName.pluk_colorscheme then
+			if flag_count > 0 then
+				H.log(LogLevel.ERROR, "pluk-colorscheme can't take any flags")
+				os.exit(1)
+			end
+
 			url = string.format("%s%s%s", os.getenv("kak_opt_pluk_git_protocol"), os.getenv("kak_opt_pluk_git_domain"), cmd[1]:sub(1,1) == '/' and cmd[1] or '/' .. cmd[1])
 			path = cmd[1]
 			config = H.create_pointer(cmd[3])
@@ -588,14 +669,14 @@ H.populate_repos = function(setup_str)
 
 		-- Get out and run all the hooks in config
 		local found_hook = false
-		for hook in H.extract_hooks(config, cmd[1]) do
+		for hook in H.extract_hooks(config, cmd[1 + flag_count]) do
 			-- hook <scope> User <hook_name> <commands>
-			H.send_command(string.format("hook global User pluk-install-index-%d %%{eval %%sh{cd %s;%s}}", repo_count, install_dir .. "/" .. path, hook))
+			H.send_command(string.format("hook global User pluk-hook-index-%d %%{eval %%sh{cd %s;%s}}", repo_count, install_dir .. "/" .. path, hook))
 
 			found_hook = true
 		end
 		if found_hook then
-			config(string.format("trigger-user-hook pluk-install-index-%d\n%s", repo_count, config()))
+			config(string.format("trigger-user-hook pluk-hook-index-%d\n%s", repo_count, config()))
 		end
 
 		---@type Repo

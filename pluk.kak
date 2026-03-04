@@ -50,14 +50,68 @@ def pluk-setup -params 1 \
         " >/dev/null
 
         # Runs setup based on constructed table of repos
-        (lua -e "require('pluk').run_setup([=[$1]=])") &
+        (lua -e "require('pluk').run_setup([=[$1]=])" >/dev/null 2>&1) &
     }
 }
 
-def pluk -params 1..2 -docstring "" %{}
+define-command pluk-repo -params 2..4 \
+    -docstring "pluk-repo [flag] <url> <path> [config]" \
+    -shell-script-candidates %{ echo "-no-source"; echo "-auto-source" } \
+    %{ evaluate-commands %sh{
+        case "$1" in -no-source|-auto-source) shift ;; esac
+        url="$1"; path="$2"
 
-def pluk-repo -params 1..3 -docstring "" %{}
+        # Regex: Full Git URL (SSH, HTTPS, or Git protocols)
+        git_url_regex="^((https?|git|ssh)://|git@).+$"
+        # Regex: Valid Linux Path (allows alphanumeric, dots, underscores, dashes, slashes)
+        linux_path_regex="^[a-zA-Z0-9._/-]+$"
 
-def pluk-install-hook -params 1 -docstring "" %{}
+        if ! echo "$url" | grep -Eq "$git_url_regex"; then
+            echo "fail 'pluk-repo: invalid git URL ($url)'"
+        elif ! echo "$path" | grep -Eq "$linux_path_regex"; then
+            echo "fail 'pluk-repo: invalid linux path ($path)'"
+        fi
+    }}
+
+define-command pluk -params 1..3 \
+    -docstring "pluk [flag] <repo> [config]" \
+    -shell-script-candidates %{ echo "-no-source"; echo "-auto-source" } \
+    %{ evaluate-commands %sh{
+        case "$1" in -no-source|-auto-source) shift ;; esac
+        repo="$1"
+
+        # Regex: URL Path (e.g., 'mawww/kakoune' or 'user/repo-name.kak')
+        url_path_regex="^[a-zA-Z0-9._/-]+$"
+
+        if ! echo "$repo" | grep -Eq "$url_path_regex"; then
+            echo "fail 'pluk: invalid repo path ($repo)'"
+        fi
+    }}
+
+define-command pluk-colorscheme -params 2..3 \
+    -docstring "pluk-colorscheme <repo> <name> [config]" \
+    %{ evaluate-commands %sh{
+        repo="$1"; name="$2"
+
+        url_path_regex="^[a-zA-Z0-9._/-]+$"
+        # Regex: No forward slashes allowed in filenames
+        filename_regex="^[^/.]+$"
+
+        if ! echo "$repo" | grep -Eq "$url_path_regex"; then
+            echo "fail 'pluk-colorscheme: invalid repo path ($repo)'"
+        elif ! echo "$name" | grep -Eq "$filename_regex"; then
+            echo "fail 'pluk-colorscheme: invalid filename ($name) - file name without ''.'''"
+        fi
+    }}
+
+define-command pluk-install-hook -params 1 \
+    -docstring "pluk-install-hook <command>" \
+    %{ evaluate-commands %sh{
+        cmd="$1"
+
+        if [ -z "$cmd" ]; then
+            echo "fail 'pluk-install-hook: empty command string'"
+        fi
+    }}
 
 }
